@@ -43,7 +43,11 @@ public:
   float     lastOrientationDeg() const { return orientation_deg; }
   int32_t   turns() const { return turn_ctr; }
   uint32_t  missedEdges() const { return missed_edges; }
-  uint32_t  lastPulseUs() const { return (uint32_t)atomicRead32(&pulse_high_us); }
+  uint32_t  lastPulseUs() const {
+    uint32_t avg = atomicRead32(&pulse_high_us_avg);
+    if (avg == 0) avg = atomicRead32(&pulse_high_us);
+    return avg;
+  }
 
   // ISR thunks
   static void IRAM_ATTR isrU();
@@ -63,8 +67,14 @@ private:
   GlobalParams& g;
 
   // ISR-shared state
+  static constexpr uint8_t kFeedbackWindow = 18;
   volatile uint32_t rise_us = 0;
   volatile uint32_t pulse_high_us = 0;
+  volatile uint16_t pulse_window[kFeedbackWindow] = {};
+  volatile uint32_t pulse_window_sum = 0;
+  volatile uint8_t  pulse_window_count = 0;
+  volatile uint8_t  pulse_window_head = 0;
+  volatile uint32_t pulse_high_us_avg = 0;
   volatile uint32_t missed_edges = 0;
 
   // Angle tracking
