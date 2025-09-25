@@ -35,8 +35,10 @@ void FeedbackServo::begin() {
   // Initialize angle reading baseline
   writeNeutral();
   delay(10);
-  uint32_t pu = atomicRead32(&pulse_high_us);
-  computeAngleFromPulse(pu);
+  uint32_t pu_raw = atomicRead32(&pulse_high_us);
+  uint32_t pu_avg = atomicRead32(&pulse_high_us_avg);
+  if (pu_avg == 0) pu_avg = pu_raw;
+  computeAngleFromPulse(pu_avg);
   abs_angle_deg = (float)turn_ctr * 360.0f + orientation_deg - angle_offset_deg;
   last_angle_deg_for_speed = abs_angle_deg;
 }
@@ -84,7 +86,25 @@ void IRAM_ATTR FeedbackServo::onEdge() {
       uint32_t pw = t - start;
       // Accept plausible range (Parallax 910 Hz, ~30..~1071 µs)
       if (pw > 5 && pw < 1500) {
+        uint8_t count = pulse_window_count;
+        uint32_t sum = pulse_window_sum;
+        if (count == kFeedbackWindow) {
+          sum -= pulse_window[pulse_window_head];
+        } else {
+          count++;
+          pulse_window_count = count;
+        }
+
+        pulse_window[pulse_window_head] = (uint16_t)pw;
+        sum += pw;
+        pulse_window_sum = sum;
+
+        uint8_t next_head = pulse_window_head + 1;
+        if (next_head >= kFeedbackWindow) next_head = 0;
+        pulse_window_head = next_head;
+
         pulse_high_us = pw;
+        pulse_high_us_avg = (count > 0) ? (sum / count) : 0;
       } else {
         missed_edges++;
       }
@@ -116,8 +136,10 @@ void FeedbackServo::computeAngleFromPulse(uint32_t pulse) {
 
 void FeedbackServo::update(float dt) {
   // Read pulse (atomic)
-  uint32_t pu = atomicRead32(&pulse_high_us);
-  computeAngleFromPulse(pu);
+  uint32_t pu_raw = atomicRead32(&pulse_high_us);
+  uint32_t pu_avg = atomicRead32(&pulse_high_us_avg);
+  if (pu_avg == 0) pu_avg = pu_raw;
+  computeAngleFromPulse(pu_avg);
 
   // Measure speed
   float ddeg = abs_angle_deg - last_angle_deg_for_speed;
