@@ -33,13 +33,15 @@ void FeedbackServo::begin() {
   if (label == 'W') attachInterrupt(digitalPinToInterrupt(pin_fb), FeedbackServo::isrW, CHANGE);
 
   // Initialize angle reading baseline
+  have_prev_orientation = false;
+  abs_unwrapped_deg = 0.f;
+  prev_orientation_deg = 0.f;
   writeNeutral();
   delay(10);
   uint32_t pu_raw = atomicRead32(&pulse_high_us);
   uint32_t pu_avg = atomicRead32(&pulse_high_us_avg);
   if (pu_avg == 0) pu_avg = pu_raw;
   computeAngleFromPulse(pu_avg);
-  abs_angle_deg = (float)turn_ctr * 360.0f + orientation_deg - angle_offset_deg;
   last_angle_deg_for_speed = abs_angle_deg;
 }
 
@@ -65,7 +67,7 @@ void FeedbackServo::setSpeedRPM(float rpm) {
 void FeedbackServo::enableHold(bool en) { hold_enabled = en; }
 void FeedbackServo::zeroHere() {
   // Rebase offset so current angle becomes 0
-  angle_offset_deg = (float)turn_ctr * 360.0f + orientation_deg;
+  angle_offset_deg = abs_unwrapped_deg;
   abs_angle_deg = 0.f;
   last_angle_deg_for_speed = 0.f;
 }
@@ -121,17 +123,20 @@ void FeedbackServo::computeAngleFromPulse(uint32_t pulse) {
   float theta = 359.0f - ((float)((int)pulse - (int)minU) * 360.0f) / ( (maxU - minU) + 1.0f );
   if (theta < 0.0f)   theta = 0.0f;
   if (theta > 359.0f) theta = 359.0f;
+  if (!have_prev_orientation) {
+    prev_orientation_deg = theta;
+    abs_unwrapped_deg = theta;
+    have_prev_orientation = true;
+  } else {
+    float delta = theta - prev_orientation_deg;
+    if (delta > 180.0f)      delta -= 360.0f;
+    else if (delta < -180.0f) delta += 360.0f;
+    abs_unwrapped_deg += delta;
+    prev_orientation_deg = theta;
+  }
+
   orientation_deg = theta;
-
-  // Quadrant wrap tracking (forward 360->0, backward 0->360)
-  if (orientation_deg < 90.0f && prev_orientation_deg > 270.0f)  turn_ctr++;
-  else if (prev_orientation_deg < 90.0f && orientation_deg > 270.0f) turn_ctr--;
-
-  prev_orientation_deg = orientation_deg;
-
-  // Absolute angle, offset-applied
-  if (turn_ctr >= 0)   abs_angle_deg = (float)turn_ctr * 360.0f + orientation_deg - angle_offset_deg;
-  else                 abs_angle_deg = (float)(turn_ctr + 1) * 360.0f - (360.0f - orientation_deg) - angle_offset_deg;
+  abs_angle_deg = abs_unwrapped_deg - angle_offset_deg;
 }
 
 void FeedbackServo::update(float dt) {
@@ -226,6 +231,12 @@ void FeedbackServo::writePulseUs(uint16_t us) {
 }
 
 float FeedbackServo::angleDeg() const { return abs_angle_deg; }
+
+int32_t FeedbackServo::turns() const {
+  if (!have_prev_orientation) return 0;
+  float turns_f = abs_unwrapped_deg / 360.0f;
+  return (int32_t)floorf(turns_f);
+}
 
 // Params setters
 void FeedbackServo::setKp(float v){ p.Kp = v; }
