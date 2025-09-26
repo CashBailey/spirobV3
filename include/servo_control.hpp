@@ -41,7 +41,7 @@ public:
 
   // Diagnostics
   float     lastOrientationDeg() const { return orientation_deg; }
-  int32_t   turns() const { return turn_ctr; }
+  int32_t   turns() const;
   uint32_t  missedEdges() const { return missed_edges; }
   uint32_t  lastPulseUs() const {
     uint32_t avg = atomicRead32(&pulse_high_us_avg);
@@ -80,11 +80,12 @@ private:
   // Angle tracking
   float    orientation_deg = 0.f;
   float    prev_orientation_deg = 0.f;
-  int32_t  turn_ctr = 0;
+  float    abs_unwrapped_deg = 0.f;
   float    angle_offset_deg = 0.f;  // ZERO_HERE offset
   float    abs_angle_deg = 0.f;     // unbounded, minus offset
   float    last_angle_deg_for_speed = 0.f;
   float    speed_rpm_meas = 0.f;
+  bool     have_prev_orientation = false;
 
   // Control
   enum Mode : uint8_t { MODE_POSITION, MODE_SPEED } mode = MODE_POSITION;
@@ -105,7 +106,8 @@ private:
   }
 
   void IRAM_ATTR onEdge();
-  void computeAngleFromPulse(uint32_t pulse);
+  void computeAngleFromPulse(uint32_t pulse_avg, uint32_t pulse_raw);
+  float pulseToDeg(uint32_t pulse) const;
   void writePulseUs(uint16_t us);
   int  cmdFromOutputAndDeadband(float output, float error_deg) const; // returns 0..180
 };

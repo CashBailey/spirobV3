@@ -33,13 +33,16 @@ void FeedbackServo::begin() {
   if (label == 'W') attachInterrupt(digitalPinToInterrupt(pin_fb), FeedbackServo::isrW, CHANGE);
 
   // Initialize angle reading baseline
+  have_prev_orientation = false;
+  abs_unwrapped_deg = 0.f;
+  prev_orientation_deg = 0.f;
   writeNeutral();
   delay(10);
   uint32_t pu_raw = atomicRead32(&pulse_high_us);
   uint32_t pu_avg = atomicRead32(&pulse_high_us_avg);
+  if (pu_raw == 0) pu_raw = pu_avg;
   if (pu_avg == 0) pu_avg = pu_raw;
-  computeAngleFromPulse(pu_avg);
-  abs_angle_deg = (float)turn_ctr * 360.0f + orientation_deg - angle_offset_deg;
+  computeAngleFromPulse(pu_avg, pu_raw);
   last_angle_deg_for_speed = abs_angle_deg;
 }
 
@@ -65,7 +68,7 @@ void FeedbackServo::setSpeedRPM(float rpm) {
 void FeedbackServo::enableHold(bool en) { hold_enabled = en; }
 void FeedbackServo::zeroHere() {
   // Rebase offset so current angle becomes 0
-  angle_offset_deg = (float)turn_ctr * 360.0f + orientation_deg;
+  angle_offset_deg = abs_unwrapped_deg;
   abs_angle_deg = 0.f;
   last_angle_deg_for_speed = 0.f;
 }
@@ -115,31 +118,45 @@ void IRAM_ATTR FeedbackServo::onEdge() {
 }
 
 // Map pulse width to 0..359° orientation (inverted, calibrated min/max).
-void FeedbackServo::computeAngleFromPulse(uint32_t pulse) {
+float FeedbackServo::pulseToDeg(uint32_t pulse) const {
   const float minU = (float)p.feed_min_us;
   const float maxU = (float)p.feed_max_us;
-  float theta = 359.0f - ((float)((int)pulse - (int)minU) * 360.0f) / ( (maxU - minU) + 1.0f );
+  float theta = 359.0f;
+  if (maxU > minU) {
+    theta -= ((float)((int)pulse - (int)minU) * 360.0f) / ((maxU - minU) + 1.0f);
+  }
   if (theta < 0.0f)   theta = 0.0f;
   if (theta > 359.0f) theta = 359.0f;
-  orientation_deg = theta;
+  return theta;
+}
 
-  // Quadrant wrap tracking (forward 360->0, backward 0->360)
-  if (orientation_deg < 90.0f && prev_orientation_deg > 270.0f)  turn_ctr++;
-  else if (prev_orientation_deg < 90.0f && orientation_deg > 270.0f) turn_ctr--;
+void FeedbackServo::computeAngleFromPulse(uint32_t pulse_avg, uint32_t pulse_raw) {
+  float theta_raw = pulseToDeg(pulse_raw);
+  float theta_filtered = pulseToDeg(pulse_avg);
 
-  prev_orientation_deg = orientation_deg;
+  if (!have_prev_orientation) {
+    prev_orientation_deg = theta_raw;
+    abs_unwrapped_deg = theta_raw;
+    have_prev_orientation = true;
+  } else {
+    float delta = theta_raw - prev_orientation_deg;
+    if (delta > 180.0f)      delta -= 360.0f;
+    else if (delta < -180.0f) delta += 360.0f;
+    abs_unwrapped_deg += delta;
+    prev_orientation_deg = theta_raw;
+  }
 
-  // Absolute angle, offset-applied
-  if (turn_ctr >= 0)   abs_angle_deg = (float)turn_ctr * 360.0f + orientation_deg - angle_offset_deg;
-  else                 abs_angle_deg = (float)(turn_ctr + 1) * 360.0f - (360.0f - orientation_deg) - angle_offset_deg;
+  orientation_deg = theta_filtered;
+  abs_angle_deg = abs_unwrapped_deg - angle_offset_deg;
 }
 
 void FeedbackServo::update(float dt) {
   // Read pulse (atomic)
   uint32_t pu_raw = atomicRead32(&pulse_high_us);
   uint32_t pu_avg = atomicRead32(&pulse_high_us_avg);
+  if (pu_raw == 0) pu_raw = pu_avg;
   if (pu_avg == 0) pu_avg = pu_raw;
-  computeAngleFromPulse(pu_avg);
+  computeAngleFromPulse(pu_avg, pu_raw);
 
   // Measure speed
   float ddeg = abs_angle_deg - last_angle_deg_for_speed;
@@ -190,8 +207,8 @@ void FeedbackServo::update(float dt) {
   int cmd = cmdFromOutputAndDeadband(cmd_out, err_for_db);
   if (cmd < 0) cmd = 0; if (cmd > 180) cmd = 180;
 
-  // Pulse width mapping: 0..180 -> 1200..1800 µs
-  const int min_us = 1200, max_us = 1800;
+  // Pulse width mapping: 0..180 -> 1280..1720 µs (Parallax spec)
+  const int min_us = 1280, max_us = 1720;
   int pulse_us = min_us + ( (max_us - min_us) * cmd ) / 180;
   writePulseUs((uint16_t)pulse_us);
 }
@@ -226,6 +243,15 @@ void FeedbackServo::writePulseUs(uint16_t us) {
 }
 
 float FeedbackServo::angleDeg() const { return abs_angle_deg; }
+
+int32_t FeedbackServo::turns() const {
+  if (!have_prev_orientation) return 0;
+  float turns_f = abs_unwrapped_deg / 360.0f;
+  if (turns_f >= 0.f) {
+    return (int32_t)floorf(turns_f);
+  }
+  return (int32_t)ceilf(turns_f);
+}
 
 // Params setters
 void FeedbackServo::setKp(float v){ p.Kp = v; }
